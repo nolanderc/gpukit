@@ -1,0 +1,23 @@
+[package]
+name = "gpukit"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.43"
+bytemuck = "1.7.2"
+egui = "0.14.0"
+inline_str = { path = "../inline_str" }
+naga = { version = "0.6.0", features = ["glsl-in", "spv-out"] }
+thiserror = "1.0.26"
+tracing = "0.1.26"
+wgpu = { version = "0.10.1", features = ["spirv"] }
+winit = "0.25.0"
+
+gpukit_derive = { path = "../gpukit_derive", optional = true }
+
+[features]
+default = ["derive"]
+derive = ["gpukit_derive"]
