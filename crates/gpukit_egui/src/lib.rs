@@ -133,8 +133,10 @@ impl Gui {
                     });
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => match delta {
-                winit::event::MouseScrollDelta::LineDelta(_, _) => {}
+            WindowEvent::MouseWheel { delta, .. } => match *delta {
+                winit::event::MouseScrollDelta::LineDelta(dx, dy) => {
+                    self.input.scroll_delta = 8.0 * egui::vec2(dx, dy);
+                }
                 winit::event::MouseScrollDelta::PixelDelta(delta) => {
                     let scale = self.window.scale_factor() as f32;
                     self.input.scroll_delta =

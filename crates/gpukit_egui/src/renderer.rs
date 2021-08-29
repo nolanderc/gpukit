@@ -151,18 +151,19 @@ impl Renderer {
             },
         );
 
+        let vertex = context
+            .build_shader("gukit_egui vertex shader")
+            .from_glsl(include_str!("shader.vert"), gpukit::ShaderStage::Vertex)?;
+
+        let fragment = context
+            .build_shader("gukit_egui fragment shader")
+            .from_glsl(include_str!("shader.frag"), gpukit::ShaderStage::Fragment)?;
+
         let pipeline = context.create_render_pipeline(gpukit::RenderPipelineDescriptor {
             label: Some("gpukit_egui renderer"),
-            shaders: gpukit::ShaderSet {
-                vertex: &gpukit::Shader::from_glsl(
-                    include_str!("shader.vert"),
-                    "egui_vertex_shader",
-                )?,
-                fragment: &gpukit::Shader::from_glsl(
-                    include_str!("shader.frag"),
-                    "egui_fragment_shader",
-                )?,
-            },
+            vertex: vertex.entry("main"),
+            fragment: fragment.entry("main"),
+
             vertex_buffers: &[gpukit::vertex_buffer_layout![
                 // Position
                 0 => Float32x2,

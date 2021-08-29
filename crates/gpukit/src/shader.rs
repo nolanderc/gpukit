@@ -1,45 +1,45 @@
 use anyhow::Context as _;
 
-use inline_str::InlineStr;
-
-pub struct Shader<Stage: shader_stage::ShaderStage> {
-    pub(super) label: InlineStr,
-    pub(super) spirv: Vec<u32>,
-    pub(super) entry_name: InlineStr,
-    _phantom: std::marker::PhantomData<Stage>,
+pub struct Shader {
+    module: wgpu::ShaderModule,
 }
 
-pub struct ShaderSet<'a> {
-    pub vertex: &'a Shader<shader_stage::Vertex>,
-    pub fragment: &'a Shader<shader_stage::Fragment>,
+pub struct ShaderEntry<'a> {
+    pub(crate) module: &'a wgpu::ShaderModule,
+    pub(crate) entry_point: &'a str,
 }
 
-pub mod shader_stage {
-    pub trait ShaderStage: sealed::ShaderStageSealed {}
+#[derive(Debug, Copy, Clone)]
+pub enum ShaderStage {
+    Vertex,
+    Fragment,
+    Compute,
+}
 
-    mod sealed {
-        pub trait ShaderStageSealed {
-            const NAGA_STAGE: naga::ShaderStage;
-        }
-    }
+pub struct ShaderDescriptor<'a> {
+    pub label: &'a str,
+    pub source: ShaderSource<'a>,
+}
 
-    macro_rules! shader_stage {
-        ($ident:ident) => {
-            pub struct $ident;
-            impl sealed::ShaderStageSealed for $ident {
-                const NAGA_STAGE: naga::ShaderStage = naga::ShaderStage::$ident;
-            }
-            impl ShaderStage for $ident {}
+pub enum ShaderSource<'a> {
+    Glsl(&'a str, ShaderStage),
+    Wgsl(&'a str),
+}
+
+pub struct ShaderBuilder<'a> {
+    context: &'a crate::Context,
+    label: &'a str,
+}
+
+impl Shader {
+    pub fn new(context: &crate::Context, desc: &ShaderDescriptor) -> anyhow::Result<Shader> {
+        let result = match desc.source {
+            ShaderSource::Glsl(source, stage) => Self::parse_glsl(source, stage, desc.label),
+            ShaderSource::Wgsl(source) => Self::parse_wgsl(source),
         };
-    }
 
-    shader_stage!(Vertex);
-    shader_stage!(Fragment);
-    shader_stage!(Compute);
-}
+        let module = result.with_context(|| anyhow!("failed to parse shader `{}`", desc.label))?;
 
-impl<Stage: shader_stage::ShaderStage> Shader<Stage> {
-    fn from_module(module: naga::Module, label: &str) -> anyhow::Result<Self> {
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::default(),
             naga::valid::Capabilities::default(),
@@ -47,7 +47,7 @@ impl<Stage: shader_stage::ShaderStage> Shader<Stage> {
 
         let info = validator
             .validate(&module)
-            .context("failed to validate shader")?;
+            .with_context(|| anyhow!("failed to validate shader `{}`", desc.label))?;
 
         let spirv = naga::back::spv::write_vec(
             &module,
@@ -64,149 +64,147 @@ impl<Stage: shader_stage::ShaderStage> Shader<Stage> {
             },
         )?;
 
-        Ok(Shader {
-            label: label.into(),
-            spirv,
-            entry_name: "main".into(),
-            _phantom: std::marker::PhantomData,
-        })
+        let module = context
+            .device
+            .create_shader_module(&wgpu::ShaderModuleDescriptor {
+                label: Some(desc.label),
+                source: wgpu::ShaderSource::SpirV(spirv.into()),
+            });
+
+        Ok(Shader { module })
     }
 
-    pub fn load_glsl(
-        path: impl AsRef<std::path::Path>,
-        name: Option<&str>,
-    ) -> anyhow::Result<Self> {
-        let path = path.as_ref();
-        let file_name = path.display().to_string();
-
-        let source = std::fs::read_to_string(path)
-            .with_context(|| anyhow!("failed to open file: {}", file_name))?;
-
-        Self::from_glsl(&source, name.unwrap_or_else(|| file_name.as_str()))
-            .with_context(|| anyhow!("failed to parse shader: {}", file_name))
-    }
-
-    pub fn from_glsl(source: &str, name: &str) -> anyhow::Result<Self> {
+    fn parse_glsl(source: &str, stage: ShaderStage, label: &str) -> anyhow::Result<naga::Module> {
         let mut parser = naga::front::glsl::Parser::default();
 
         let options = naga::front::glsl::Options {
-            stage: Stage::NAGA_STAGE,
+            stage: stage.into(),
             defines: Default::default(),
         };
 
         match parser.parse(&options, source) {
-            Ok(module) => Shader::from_module(module, name),
+            Ok(module) => Ok(module),
             Err(errors) => {
-                let error_iter = errors.into_iter().map(|error| {
-                    (
-                        error.kind,
-                        SourceSpan {
-                            start: error.meta.start,
-                            end: error.meta.end,
-                        },
-                    )
-                });
+                let file = codespan_reporting::files::SimpleFile::new(label, source);
+                let mut writer = codespan_reporting::term::termcolor::Buffer::ansi();
+                let config = codespan_reporting::term::Config::default();
 
-                Err(anyhow!(
-                    "{}",
-                    concat_shader_errors(error_iter, source, name)
-                ))
-            }
-        }
-    }
-}
+                for error in errors {
+                    use codespan_reporting::diagnostic::{Diagnostic, Label};
 
-struct SourceSpan {
-    start: usize,
-    end: usize,
-}
-
-fn concat_shader_errors<T>(
-    errors: impl Iterator<Item = (T, SourceSpan)>,
-    source: &str,
-    label: &str,
-) -> String
-where
-    T: std::fmt::Display,
-{
-    use std::fmt::Write;
-
-    let line_endings = source
-        .bytes()
-        .enumerate()
-        .filter(|(_, byte)| *byte == b'\n')
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-
-    // returns the line number and column of the given byte offset
-    let source_location = |index: usize| match line_endings.binary_search(&index) {
-        Ok(line) | Err(line) => {
-            let line_start = if line == 0 {
-                0
-            } else {
-                line_endings[line - 1] + 1
-            };
-            (line, index - line_start)
-        }
-    };
-
-    let mut text = String::new();
-    for (i, (error, span)) in errors.enumerate() {
-        if i > 0 {
-            text.push('\n');
-        }
-
-        let (start_line, start_column) = source_location(span.start);
-        let (end_line, end_column) = source_location(span.end);
-
-        let _ = writeln!(text, "ERROR: {}", error);
-
-        if start_line == end_line {
-            let _ = writeln!(
-                text,
-                " --> {} line {}:{}-{}",
-                label,
-                1 + start_line,
-                1 + start_column,
-                1 + end_column
-            );
-        } else {
-            let _ = writeln!(
-                text,
-                " --> {} line {}:{}-{}:{}",
-                label,
-                1 + start_line,
-                1 + start_column,
-                1 + end_line,
-                1 + end_column
-            );
-        }
-
-        let snippet_start = line_endings
-            .get(start_line.wrapping_sub(1))
-            .copied()
-            .map(|offset| offset + 1)
-            .unwrap_or(0);
-        let snippet_end = line_endings.get(end_line).copied().unwrap_or(source.len());
-
-        let snippet = source[snippet_start..snippet_end].trim_end();
-
-        for line in snippet.lines() {
-            let _ = writeln!(text, "  | {}", line);
-        }
-
-        if start_line == end_line {
-            text.push_str("    ");
-            for column in 0..snippet.len() {
-                if start_column <= column && column < end_column {
-                    text.push('^');
-                } else {
-                    text.push(' ');
+                    let start = error.meta.start;
+                    let end = error.meta.end;
+                    let diagnostic = Diagnostic::error()
+                        .with_message(error.kind.to_string())
+                        .with_labels(vec![Label::primary((), start..end)]);
+                    codespan_reporting::term::emit(&mut writer, &config, &file, &diagnostic)
+                        .unwrap();
                 }
+
+                let text = String::from_utf8(writer.into_inner()).unwrap();
+                Err(anyhow!("{}", text))
             }
-            text.push('\n');
         }
     }
 
-    text
+    fn parse_wgsl(source: &str) -> anyhow::Result<naga::Module> {
+        naga::front::wgsl::parse_str(source).map_err(|err| {
+            let message = err.emit_to_string(source);
+            anyhow!("{}", message)
+        })
+    }
+
+    pub fn entry<'a>(&'a self, name: &'a str) -> ShaderEntry<'a> {
+        ShaderEntry {
+            module: &self.module,
+            entry_point: name,
+        }
+    }
+}
+
+impl<'a> ShaderBuilder<'a> {
+    pub(crate) fn new(context: &'a crate::Context, label: &'a str) -> Self {
+        ShaderBuilder { context, label }
+    }
+
+    fn from_source(self, source: ShaderSource) -> anyhow::Result<Shader> {
+        Shader::new(
+            self.context,
+            &ShaderDescriptor {
+                label: self.label,
+                source,
+            },
+        )
+    }
+
+    pub fn from_glsl(self, source: &str, stage: ShaderStage) -> anyhow::Result<Shader> {
+        self.from_source(ShaderSource::Glsl(source, stage))
+    }
+
+    pub fn from_wgsl(self, source: &str) -> anyhow::Result<Shader> {
+        self.from_source(ShaderSource::Wgsl(source))
+    }
+
+    pub fn load(self, path: impl AsRef<std::path::Path>) -> anyhow::Result<Shader> {
+        let path = path.as_ref();
+
+        let load_context = || format!("failed to load shader `{}`", path.display());
+
+        let kind = ShaderKind::infer_from_path(path)
+            .with_context(|| format!("failed to infer shader kind"))
+            .with_context(load_context)?;
+
+        let text = std::fs::read_to_string(path).with_context(load_context)?;
+
+        self.from_source(kind.source(&text))
+    }
+}
+
+enum ShaderKind {
+    Glsl(ShaderStage),
+    Wgsl,
+}
+
+impl ShaderKind {
+    fn infer_from_path(path: &std::path::Path) -> anyhow::Result<ShaderKind> {
+        let extension = path.extension().and_then(|ext| ext.to_str());
+
+        match extension {
+            Some("vert") => Ok(ShaderKind::Glsl(ShaderStage::Vertex)),
+            Some("frag") => Ok(ShaderKind::Glsl(ShaderStage::Fragment)),
+            Some("comp") => Ok(ShaderKind::Glsl(ShaderStage::Compute)),
+            Some("wgsl") => Ok(ShaderKind::Wgsl),
+            Some(extension) => {
+                return Err(anyhow!("unknown shader path extension: `{}`", extension))
+            }
+            None => return Err(anyhow!("shader path missing extension")),
+        }
+    }
+
+    pub fn source(self, source: &str) -> ShaderSource {
+        match self {
+            ShaderKind::Glsl(stage) => ShaderSource::Glsl(source, stage),
+            ShaderKind::Wgsl => ShaderSource::Wgsl(source),
+        }
+    }
+}
+
+impl From<ShaderStage> for naga::ShaderStage {
+    fn from(stage: ShaderStage) -> Self {
+        match stage {
+            ShaderStage::Vertex => naga::ShaderStage::Vertex,
+            ShaderStage::Fragment => naga::ShaderStage::Fragment,
+            ShaderStage::Compute => naga::ShaderStage::Compute,
+        }
+    }
+}
+
+impl From<naga::ShaderStage> for ShaderStage {
+    fn from(stage: naga::ShaderStage) -> Self {
+        match stage {
+            naga::ShaderStage::Vertex => ShaderStage::Vertex,
+            naga::ShaderStage::Fragment => ShaderStage::Fragment,
+            naga::ShaderStage::Compute => ShaderStage::Compute,
+        }
+    }
 }

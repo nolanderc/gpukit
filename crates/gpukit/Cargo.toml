@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.43"
 bytemuck = "1.7.2"
+codespan-reporting = "0.11.1"
 egui = "0.14.0"
 inline_str = { path = "../inline_str" }
 naga = { version = "0.6.0", features = ["glsl-in", "spv-out"] }

@@ -14,19 +14,37 @@ struct Vertex {
 }
 
 #[derive(Bindings)]
-struct GlobalBindings<'a> {
+struct FrameBindings<'a> {
     #[uniform(binding = 0)]
-    uniforms: &'a gpukit::Buffer<GlobalUniforms>,
+    uniforms: &'a gpukit::Buffer<FrameUniforms>,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct FrameUniforms {
+    camera_transform: glam::Mat4,
+    camera_position: glam::Vec3,
+    _padding0: f32,
+    light: LightData,
+    _padding1: [f32; 3],
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct GlobalUniforms {
-    camera_transform: glam::Mat4,
+struct LightData {
+    position: glam::Vec3,
+    brightness: f32,
+    specular: f32,
 }
 
-trait View {
-    fn view(&mut self, ui: &mut egui::Ui) -> egui::Response;
+impl Default for LightData {
+    fn default() -> Self {
+        LightData {
+            position: glam::vec3(1.0, 1.0, 1.0),
+            brightness: 1.0,
+            specular: 0.7,
+        }
+    }
 }
 
 struct State {
@@ -34,6 +52,8 @@ struct State {
 
     viewport: egui::Rect,
     camera: Camera,
+
+    frame_uniforms: gpukit::UniformBuffer<FrameUniforms>,
 }
 
 struct Settings {
@@ -41,7 +61,7 @@ struct Settings {
 }
 
 impl State {
-    pub fn new(window: &winit::window::Window) -> Self {
+    pub fn new(context: &gpukit::Context, window: &winit::window::Window) -> Self {
         let size = window.inner_size();
 
         State {
@@ -53,19 +73,20 @@ impl State {
                 egui::vec2(size.width as f32, size.height as f32),
             ),
             camera: Camera {
-                pos: [0.0, 0.0, 4.0].into(),
+                position: [0.0, 0.0, 4.0].into(),
                 focus: glam::vec3(0.0, 0.0, 0.0),
                 up: glam::Vec3::Y,
-                fov: 90f32.to_radians(),
+                fov: 70f32.to_radians(),
                 near: 0.1,
-                far: 10.0,
+                far: 50.0,
             },
+            frame_uniforms: gpukit::UniformBuffer::new(context, FrameUniforms::default()),
         }
     }
 }
 
 struct Camera {
-    pos: glam::Vec3,
+    position: glam::Vec3,
     focus: glam::Vec3,
     up: glam::Vec3,
     fov: f32,
@@ -80,11 +101,15 @@ impl Camera {
     }
 
     pub fn view_matrix(&self) -> glam::Mat4 {
-        glam::Mat4::look_at_rh(self.pos, self.focus, self.up)
+        glam::Mat4::look_at_rh(self.position, self.focus, self.up)
+    }
+
+    pub fn transform(&self, size: [f32; 2]) -> glam::Mat4 {
+        self.projection_matrix(size) * self.view_matrix()
     }
 
     fn right(&self) -> glam::Vec3 {
-        let dir = (self.focus - self.pos).normalize();
+        let dir = (self.focus - self.position).normalize();
         self.up.cross(dir)
     }
 }
@@ -103,14 +128,18 @@ fn main() -> anyhow::Result<()> {
     let window = Arc::new(window);
 
     let (context, mut surface) = pollster::block_on(gpukit::init(&window))?;
+    let mut state = State::new(&context, &window);
 
     let mut depth_texture = create_depth_texture(&context, surface.size());
 
-    let global_layout = GlobalBindings::layout(&context.device);
-    let global_uniforms = context
-        .build_buffer()
-        .with_usage(wgpu::BufferUsages::UNIFORM)
-        .init_with_capacity(1);
+    let frame_layout = FrameBindings::layout(&context.device);
+    let frame_bindings = Bindings::create_bind_group(
+        &FrameBindings {
+            uniforms: state.frame_uniforms.buffer(),
+        },
+        &context.device,
+        &frame_layout,
+    );
 
     let (vertices, indices) = load_model("examples/cube/models/monkey.glb")?;
 
@@ -124,14 +153,18 @@ fn main() -> anyhow::Result<()> {
         .with_usage(wgpu::BufferUsages::INDEX)
         .init_with_data(&indices);
 
+    let shader = context
+        .build_shader("cube shader")
+        .from_wgsl(include_str!("shader.wgsl"))?;
+
     let pipeline = context.create_render_pipeline(gpukit::RenderPipelineDescriptor {
         label: Some("cube render pipeline"),
-        shaders: gpukit::ShaderSet {
-            vertex: &gpukit::Shader::from_glsl(include_str!("shader.vert"), "shader.vert")?,
-            fragment: &gpukit::Shader::from_glsl(include_str!("shader.frag"), "shader.frag")?,
-        },
+
+        vertex: shader.entry("vs_main"),
+        fragment: shader.entry("fs_main"),
+
         color_targets: &[surface.color_target(None)],
-        bind_group_layouts: &[&global_layout],
+        bind_group_layouts: &[&frame_layout],
         vertex_buffers: &[gpukit::vertex_buffer_layout! [
             // Position
             0 => Float32x3,
@@ -152,8 +185,6 @@ fn main() -> anyhow::Result<()> {
         window: window.clone(),
         target_format: surface.texture_format(),
     })?;
-
-    let mut state = State::new(&window);
 
     event_loop.run(move |event, _target, flow| match event {
         winit::event::Event::WindowEvent { event, .. } => {
@@ -178,27 +209,16 @@ fn main() -> anyhow::Result<()> {
             let result = || -> anyhow::Result<()> {
                 gui.update(&mut state, draw_gui)?;
 
-                let camera_transform = {
-                    let projection = state.camera.projection_matrix(state.viewport.size().into());
-                    let view = state.camera.view_matrix();
-                    projection * view
-                };
-
-                global_uniforms.update(&context, &[GlobalUniforms { camera_transform }]);
+                state.frame_uniforms.camera_position = state.camera.position;
+                state.frame_uniforms.camera_transform =
+                    state.camera.transform(state.viewport.size().into());
+                state.frame_uniforms.update(&context);
 
                 let frame = surface.get_current_frame()?;
                 let frame_view = frame.output.texture.create_view(&Default::default());
                 let depth_view = depth_texture.create_view();
 
                 let mut encoder = context.create_encoder();
-
-                let globals = Bindings::create_bind_group(
-                    &GlobalBindings {
-                        uniforms: &global_uniforms,
-                    },
-                    &context.device,
-                    &global_layout,
-                );
 
                 let window_size = window.inner_size();
                 let pixels_per_point = window.scale_factor() as f32;
@@ -251,7 +271,7 @@ fn main() -> anyhow::Result<()> {
                         rpass.set_pipeline(&pipeline);
                         rpass.set_index_buffer_ext(index_buffer.slice(..));
                         rpass.set_vertex_buffer(0, *vertex_buffer.slice(..));
-                        rpass.set_bind_group(0, &globals, &[]);
+                        rpass.set_bind_group(0, &frame_bindings, &[]);
                         rpass.draw_indexed(0..index_buffer.len() as u32, 0, 0..1);
                     }
 
@@ -363,7 +383,7 @@ fn draw_gui(ctx: egui::CtxRef, state: &mut State) -> anyhow::Result<()> {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("clear color:");
+                    ui.label("clear color");
                     egui::color_picker::color_edit_button_hsva(
                         ui,
                         &mut state.settings.clear_color,
@@ -373,16 +393,16 @@ fn draw_gui(ctx: egui::CtxRef, state: &mut State) -> anyhow::Result<()> {
 
                 ui.collapsing("camera", |ui| {
                     let camera = &mut state.camera;
-                    egui::Grid::new("camera_grid").show(ui, |ui| {
-                        ui.label("fov:");
+                    egui::Grid::new("properties").show(ui, |ui| {
+                        ui.label("fov");
                         if angle_slider(ui, &mut camera.fov, 1.0..=179.0).changed() {
                             let angle = camera.fov / 2.0;
                             let distance = 2.0 * angle.tan().recip();
-                            camera.pos = distance * camera.pos.normalize();
+                            camera.position = distance * camera.position.normalize();
                         }
                         ui.end_row();
 
-                        ui.label("near:");
+                        ui.label("near");
                         ui.add(
                             egui::Slider::new(&mut camera.near, 0.1..=camera.far)
                                 .max_decimals(2)
@@ -391,15 +411,32 @@ fn draw_gui(ctx: egui::CtxRef, state: &mut State) -> anyhow::Result<()> {
                         );
                         ui.end_row();
 
-                        ui.label("far:");
+                        ui.label("far");
                         ui.add(
-                            egui::Slider::new(&mut camera.far, camera.near..=10.0)
+                            egui::Slider::new(&mut camera.far, camera.near..=100.0)
                                 .max_decimals(2)
                                 .logarithmic(true)
                                 .clamp_to_range(false),
                         );
                         ui.end_row();
                     })
+                });
+
+                ui.collapsing("light", |ui| {
+                    let light = &mut state.frame_uniforms.light;
+                    egui::Grid::new("properties").show(ui, |ui| {
+                        ui.label("position");
+                        vec3_slider(ui, &mut light.position, -5.0..=5.0);
+                        ui.end_row();
+
+                        ui.label("brightness");
+                        ui.add(egui::Slider::new(&mut light.brightness, 0.0..=5.0));
+                        ui.end_row();
+
+                        ui.label("specular");
+                        ui.add(egui::Slider::new(&mut light.specular, 0.0..=1.0));
+                        ui.end_row();
+                    });
                 });
             });
         });
@@ -414,25 +451,111 @@ fn draw_gui(ctx: egui::CtxRef, state: &mut State) -> anyhow::Result<()> {
             state.viewport = ui.max_rect_finite();
             let response = ui.allocate_rect(state.viewport, egui::Sense::click_and_drag());
 
-            let mut distance = state.camera.pos.length();
-
-            if response.hovered() {
-                let scroll = ui.input().scroll_delta;
-                const SCROLL_SENSITIVITY: f32 = 2e-3;
-                distance *= (1.0 + SCROLL_SENSITIVITY).powf(scroll.y);
-            }
+            let look_delta = state.camera.focus - state.camera.position;
+            let mut distance = look_delta.length();
+            let look_dir = look_delta / distance;
 
             let drag = response.drag_delta();
-            let dx = 5.0 * drag.x / state.viewport.width();
-            let dy = 5.0 * drag.y / state.viewport.height();
 
-            let yaw = glam::Quat::from_rotation_y(-dx);
-            let pitch = glam::Quat::from_axis_angle(state.camera.right(), dy);
-            state.camera.pos =
-                distance * ((pitch * yaw) * state.camera.pos.normalize()).normalize();
+            let mut rotation = glam::Quat::IDENTITY;
+            if response.dragged_by(egui::PointerButton::Primary) {
+                let dx = 5.0 * drag.x / state.viewport.width();
+                let dy = 5.0 * drag.y / state.viewport.height();
+                rotation *= glam::Quat::from_rotation_y(-dx);
+                rotation *= glam::Quat::from_axis_angle(state.camera.right(), dy);
+            }
+
+            const ZOOM_SPEED: f32 = 2e-3;
+            if response.dragged_by(egui::PointerButton::Secondary) {
+                distance *= (1.0 + ZOOM_SPEED).powf(drag.y);
+            }
+            if response.hovered() {
+                let scroll = ui.input().scroll_delta;
+                distance *= (1.0 + ZOOM_SPEED).powf(-scroll.y);
+            }
+
+            state.camera.position =
+                state.camera.focus - distance * (rotation * look_dir).normalize();
         });
 
     Ok(())
+}
+
+fn vec3_slider(
+    ui: &mut egui::Ui,
+    vec: &mut glam::Vec3,
+    ranges: impl Into<MultiRange<f32, 3>>,
+) -> egui::Response {
+    let MultiRange([x_range, y_range, z_range]) = ranges.into();
+    let [x, y, z] = vec.as_mut();
+    multi_slider(
+        ui,
+        [
+            ("X", egui::Slider::new(x, x_range)),
+            ("Y", egui::Slider::new(y, y_range)),
+            ("Z", egui::Slider::new(z, z_range)),
+        ],
+    )
+}
+
+struct MultiRange<T, const N: usize>([std::ops::RangeInclusive<T>; N]);
+
+impl<T, const N: usize> From<[std::ops::RangeInclusive<T>; N]> for MultiRange<T, N> {
+    fn from(ranges: [std::ops::RangeInclusive<T>; N]) -> Self {
+        MultiRange(ranges)
+    }
+}
+
+impl<T, const N: usize> From<std::ops::RangeInclusive<T>> for MultiRange<T, N>
+where
+    T: Clone,
+{
+    fn from(range: std::ops::RangeInclusive<T>) -> Self {
+        MultiRange(array_init_clone(range))
+    }
+}
+
+fn array_init_clone<T: Clone, const N: usize>(value: T) -> [T; N] {
+    use std::mem::MaybeUninit;
+    let mut array: [MaybeUninit<T>; N] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    for slot in &mut array {
+        *slot = MaybeUninit::new(value.clone());
+    }
+    unsafe { (&array as *const _ as *const [T; N]).read() }
+}
+
+fn multi_slider<const N: usize>(
+    ui: &mut egui::Ui,
+    values: [(&str, egui::Slider); N],
+) -> egui::Response {
+    ui.vertical(|ui| {
+        let mut sizes = [egui::vec2(0.0, 0.0); N];
+        for (size, (label, _)) in sizes.iter_mut().zip(&values) {
+            let layout = egui::Label::new(label).layout(ui);
+            *size = layout.size;
+        }
+
+        let label_size = sizes.iter().fold(egui::vec2(0.0, 0.0), |acc, size| {
+            egui::vec2(f32::max(acc.x, size.x), f32::max(acc.y, size.y))
+        });
+
+        let mut responses: Option<egui::Response> = None;
+        for (label, slider) in values {
+            ui.horizontal(|ui| {
+                ui.add_sized(label_size, egui::Label::new(label));
+                let response = ui.add(slider);
+
+                if let Some(responses) = responses.as_mut() {
+                    *responses = responses.union(response)
+                } else {
+                    responses = Some(response);
+                }
+            });
+        }
+
+        responses.unwrap()
+    })
+    .inner
 }
 
 fn angle_slider(

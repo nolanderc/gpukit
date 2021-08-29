@@ -113,10 +113,19 @@ impl<'device, 'label, T: bytemuck::Pod> BufferBuilder<'device, 'label, T> {
     pub fn init_with_data(&mut self, data: &[T]) -> Buffer<T> {
         use wgpu::util::DeviceExt;
 
+        let label;
+        let label = match self.label {
+            Some(label) => Some(label),
+            None => {
+                label = format!("Buffer<{}>", std::any::type_name::<T>());
+                Some(label.as_str())
+            }
+        };
+
         let raw = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: self.label,
+                label,
                 usage: self.usage | wgpu::BufferUsages::COPY_DST,
                 contents: bytemuck::cast_slice(data),
             });
@@ -162,5 +171,52 @@ impl<T: BufferResource> BufferResource for &T {
 
     fn buffer_binding(&self) -> wgpu::BufferBinding {
         T::buffer_binding(*self)
+    }
+}
+
+pub struct UniformBuffer<T: bytemuck::Pod> {
+    buffer: Buffer<T>,
+    data: T,
+}
+
+impl<T> std::ops::Deref for UniformBuffer<T>
+where
+    T: bytemuck::Pod,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<T> std::ops::DerefMut for UniformBuffer<T>
+where
+    T: bytemuck::Pod,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+impl<T> UniformBuffer<T>
+where
+    T: bytemuck::Pod,
+{
+    pub fn new(context: &crate::Context, data: T) -> Self {
+        let buffer = context
+            .build_buffer()
+            .with_usage(wgpu::BufferUsages::UNIFORM)
+            .init_with_data(std::slice::from_ref(&data));
+        UniformBuffer { buffer, data }
+    }
+
+    pub fn update(&self, context: &crate::Context) {
+        self.buffer
+            .update(context, std::slice::from_ref(&self.data));
+    }
+
+    pub fn buffer(&self) -> &Buffer<T> {
+        &self.buffer
     }
 }

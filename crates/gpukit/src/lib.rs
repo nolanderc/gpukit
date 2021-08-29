@@ -90,22 +90,23 @@ impl Context {
         TextureBuilder::new(self)
     }
 
+    pub fn build_shader<'a>(&'a self, label: &'a str) -> ShaderBuilder<'a> {
+        ShaderBuilder::new(self, label)
+    }
+
     pub fn create_render_pipeline(
         &self,
         desc: RenderPipelineDescriptor,
     ) -> anyhow::Result<wgpu::RenderPipeline> {
-        let vertex_module = self.create_shader_module(desc.shaders.vertex);
-        let fragment_module = self.create_shader_module(desc.shaders.fragment);
-
         let vertex = wgpu::VertexState {
-            module: &vertex_module,
-            entry_point: &desc.shaders.vertex.entry_name,
+            module: &desc.vertex.module,
+            entry_point: &desc.vertex.entry_point,
             buffers: desc.vertex_buffers,
         };
 
         let fragment = Some(wgpu::FragmentState {
-            module: &fragment_module,
-            entry_point: &desc.shaders.fragment.entry_name,
+            module: &desc.fragment.module,
+            entry_point: &desc.fragment.entry_point,
             targets: desc.color_targets,
         });
 
@@ -138,17 +139,6 @@ impl Context {
             });
 
         Ok(pipeline)
-    }
-
-    fn create_shader_module<Stage: shader_stage::ShaderStage>(
-        &self,
-        shader: &Shader<Stage>,
-    ) -> wgpu::ShaderModule {
-        self.device
-            .create_shader_module(&wgpu::ShaderModuleDescriptor {
-                label: Some(&shader.label),
-                source: wgpu::ShaderSource::SpirV(shader.spirv.as_slice().into()),
-            })
     }
 
     pub fn create_encoder(&self) -> wgpu::CommandEncoder {
@@ -252,7 +242,8 @@ impl Surface {
 
 pub struct RenderPipelineDescriptor<'a> {
     pub label: Option<&'a str>,
-    pub shaders: ShaderSet<'a>,
+    pub vertex: ShaderEntry<'a>,
+    pub fragment: ShaderEntry<'a>,
     pub vertex_buffers: &'a [wgpu::VertexBufferLayout<'a>],
     pub bind_group_layouts: &'a [&'a wgpu::BindGroupLayout],
     pub color_targets: &'a [wgpu::ColorTargetState],
