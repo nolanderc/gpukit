@@ -190,6 +190,10 @@ impl Renderer {
                 write_mask: wgpu::ColorWrites::all(),
             }],
             depth_stencil: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
         })?;
 
         Ok(Renderer {

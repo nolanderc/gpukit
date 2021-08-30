@@ -124,15 +124,7 @@ impl Context {
                 label: desc.label,
                 layout: Some(&layout),
                 vertex,
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    clamp_depth: false,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    conservative: false,
-                },
+                primitive: desc.primitive,
                 depth_stencil: desc.depth_stencil,
                 multisample: wgpu::MultisampleState::default(),
                 fragment,
@@ -248,6 +240,7 @@ pub struct RenderPipelineDescriptor<'a> {
     pub bind_group_layouts: &'a [&'a wgpu::BindGroupLayout],
     pub color_targets: &'a [wgpu::ColorTargetState],
     pub depth_stencil: Option<wgpu::DepthStencilState>,
+    pub primitive: wgpu::PrimitiveState,
 }
 
 pub trait RenderPassExt<'encoder> {
