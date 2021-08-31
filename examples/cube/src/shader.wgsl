@@ -35,7 +35,7 @@ fn vs_main(
     var out: VertexOutput;
     out.out_position = frame.camera_transform * vec4<f32>(position, 1.0);
     out.position = position;
-    out.normal = normalize(normal);
+    out.normal = normal;
     return out;
 }
 

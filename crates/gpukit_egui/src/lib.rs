@@ -1,4 +1,5 @@
 mod renderer;
+pub mod file_explorer;
 
 pub use egui;
 pub use renderer::{Renderer, RendererDescriptor};

@@ -153,11 +153,11 @@ impl Renderer {
 
         let vertex = context
             .build_shader("gukit_egui vertex shader")
-            .from_glsl(include_str!("shader.vert"), gpukit::ShaderStage::Vertex)?;
+            .init_from_glsl(include_str!("shader.vert"), gpukit::ShaderStage::Vertex)?;
 
         let fragment = context
             .build_shader("gukit_egui fragment shader")
-            .from_glsl(include_str!("shader.frag"), gpukit::ShaderStage::Fragment)?;
+            .init_from_glsl(include_str!("shader.frag"), gpukit::ShaderStage::Fragment)?;
 
         let pipeline = context.create_render_pipeline(gpukit::RenderPipelineDescriptor {
             label: Some("gpukit_egui renderer"),
@@ -343,27 +343,8 @@ impl Renderer {
                     texture: &self.texture.create_view(),
                 },
             );
-
-            save_ppm_image(texture, "out.ppm").unwrap();
         }
     }
-}
-
-fn save_ppm_image(texture: &egui::Texture, path: &str) -> anyhow::Result<()> {
-    use std::io::Write;
-
-    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(file, "P6")?;
-    writeln!(file, "{} {}", texture.width, texture.height)?;
-    writeln!(file, "255")?;
-
-    for row in texture.pixels.chunks_exact(texture.width) {
-        for &col in row {
-            file.write_all(&[col, col, col])?;
-        }
-    }
-
-    Ok(())
 }
 
 struct BufferOffset {

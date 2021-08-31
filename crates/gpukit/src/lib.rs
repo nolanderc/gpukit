@@ -99,14 +99,14 @@ impl Context {
         desc: RenderPipelineDescriptor,
     ) -> anyhow::Result<wgpu::RenderPipeline> {
         let vertex = wgpu::VertexState {
-            module: &desc.vertex.module,
-            entry_point: &desc.vertex.entry_point,
+            module: desc.vertex.module,
+            entry_point: desc.vertex.entry_point,
             buffers: desc.vertex_buffers,
         };
 
         let fragment = Some(wgpu::FragmentState {
-            module: &desc.fragment.module,
-            entry_point: &desc.fragment.entry_point,
+            module: desc.fragment.module,
+            entry_point: desc.fragment.entry_point,
             targets: desc.color_targets,
         });
 

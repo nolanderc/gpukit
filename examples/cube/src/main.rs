@@ -1,12 +1,10 @@
 use anyhow::{anyhow, Context as _};
 
-use gpukit::Bindings;
 use std::sync::Arc;
 
+use gpukit::Bindings;
 use gpukit::{wgpu, winit};
 use gpukit_egui::egui;
-
-use egui::NumExt;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -75,8 +73,6 @@ struct State {
 
     frame_uniforms: gpukit::UniformBuffer<FrameUniforms>,
 
-    file_explorer: FileExplorer,
-
     load_model: Option<std::path::PathBuf>,
 }
 
@@ -85,10 +81,10 @@ struct Settings {
 }
 
 impl State {
-    pub fn new(context: &gpukit::Context, window: &winit::window::Window) -> Self {
+    pub fn new(context: &gpukit::Context, window: &winit::window::Window) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
-        State {
+        Ok(State {
             settings: Settings {
                 clear_color: egui::color::Hsva::from_srgb([0, 0, 0]),
             },
@@ -106,27 +102,8 @@ impl State {
             },
             frame_uniforms: gpukit::UniformBuffer::new(context, FrameUniforms::default()),
 
-            file_explorer: FileExplorer::open_folder("."),
             load_model: None,
-        }
-    }
-}
-
-struct FileExplorer {
-    path: std::path::PathBuf,
-}
-
-impl FileExplorer {
-    pub fn open_folder(path: impl Into<std::path::PathBuf>) -> FileExplorer {
-        let mut path = path.into();
-        if path.is_relative() {
-            if let Ok(mut cwd) = std::env::current_dir() {
-                cwd.push(path);
-                path = cwd;
-            }
-        }
-
-        FileExplorer { path }
+        })
     }
 }
 
@@ -177,7 +154,7 @@ fn main() -> anyhow::Result<()> {
     let window = Arc::new(window);
 
     let (context, mut surface) = pollster::block_on(gpukit::init(&window))?;
-    let mut state = State::new(&context, &window);
+    let mut state = State::new(&context, &window)?;
 
     let mut depth_texture = create_depth_texture(&context, surface.size());
 
@@ -204,7 +181,7 @@ fn main() -> anyhow::Result<()> {
 
     let shader = context
         .build_shader("cube shader")
-        .from_wgsl(include_str!("shader.wgsl"))?;
+        .init_from_wgsl(include_str!("shader.wgsl"))?;
 
     let pipeline = context.create_render_pipeline(gpukit::RenderPipelineDescriptor {
         label: Some("cube render pipeline"),
@@ -480,6 +457,15 @@ fn draw_gui(ctx: egui::CtxRef, state: &mut State) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn show_file_explorer(ui: &mut egui::Ui, state: &mut State) {
+    use gpukit_egui::file_explorer;
+    file_explorer::FileExplorer::new("explorer")
+        .initial_path(".")
+        .show(ui, |event| match event {
+            file_explorer::Event::OpenFile(path) => state.load_model = Some(path.to_owned()),
+        });
+}
+
 fn show_settings(ui: &mut egui::Ui, state: &mut State) {
     egui::ScrollArea::auto_sized().show(ui, |ui| {
         ui.vertical_centered(|ui| {
@@ -557,259 +543,6 @@ fn show_settings(ui: &mut egui::Ui, state: &mut State) {
                 ui.end_row();
             });
         });
-    });
-}
-
-fn show_file_explorer(ui: &mut egui::Ui, state: &mut State) {
-    let explorer = &mut state.file_explorer;
-
-    egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
-        ui.horizontal(|ui| {
-            if ui.button("up").clicked() {
-                explorer.path.pop();
-            }
-
-            ui.label(explorer.path.display().to_string());
-        })
-    });
-
-    let entries = match std::fs::read_dir(&explorer.path) {
-        Ok(entries) => entries,
-        Err(error) => {
-            let label = egui::Label::new(format!(
-                "failed to load `{}`: {}",
-                explorer.path.display(),
-                error
-            ))
-            .wrap(true);
-
-            ui.allocate_ui_with_layout(
-                ui.available_size(),
-                egui::Layout::left_to_right().with_cross_align(egui::Align::Center),
-                |ui| ui.add_sized(ui.available_size(), label),
-            );
-
-            return;
-        }
-    };
-
-    let mut entries = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .map(|path| {
-            if path.is_dir() {
-                (PathKind::Directory, path)
-            } else {
-                (PathKind::File, path)
-            }
-        })
-        .collect::<Vec<_>>();
-    entries.sort();
-
-    egui::ScrollArea::auto_sized().show(ui, |ui| {
-        let icon_size = 64.0;
-        let padding = 10.0;
-        let width = ui.available_width();
-        let columns = (width / (icon_size + padding)).floor().at_least(1.0) as usize;
-
-        egui::Grid::new("grid").show(ui, |ui| {
-            for (i, (kind, path)) in entries.into_iter().enumerate() {
-                if i > 0 && i % columns == 0 {
-                    ui.end_row();
-                }
-
-                if explorer_entry_icon(ui, &path, kind, icon_size).double_clicked() {
-                    if kind.is_directory() {
-                        state.file_explorer.path = path;
-                    } else {
-                        state.load_model = Some(path);
-                    }
-                }
-            }
-        });
-    });
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum PathKind {
-    Directory,
-    File,
-}
-
-impl PathKind {
-    /// Returns `true` if the path kind is [`Directory`].
-    ///
-    /// [`Directory`]: PathKind::Directory
-    fn is_directory(&self) -> bool {
-        matches!(self, Self::Directory)
-    }
-}
-
-fn explorer_entry_icon(
-    ui: &mut egui::Ui,
-    path: &std::path::Path,
-    kind: PathKind,
-    icon_size: f32,
-) -> egui::Response {
-    let padding = 5.0;
-    let inner_width = icon_size - 2.0 * padding;
-
-    ui.vertical_centered(|ui| {
-        ui.set_min_width(icon_size);
-        ui.set_max_width(icon_size);
-
-        let text = path
-            .file_name()
-            .map(|name| name.to_string_lossy())
-            .unwrap_or_else(|| "<unknown>".into())
-            .into_owned();
-
-        let layout = ui
-            .fonts()
-            .layout_multiline(egui::TextStyle::Body, text, inner_width);
-
-        let (outer_rect, response) = ui.allocate_exact_size(
-            egui::vec2(
-                icon_size,
-                padding + icon_size + padding + layout.size.y + padding,
-            ),
-            egui::Sense::click(),
-        );
-        let inner_rect = outer_rect.shrink(padding);
-
-        let style = &ui.visuals().widgets;
-
-        {
-            let corner_radius;
-            let fill_color;
-            if response.hovered() {
-                corner_radius = style.hovered.corner_radius;
-                fill_color = style.hovered.bg_fill;
-            } else {
-                corner_radius = style.noninteractive.corner_radius;
-                fill_color = style.noninteractive.bg_fill;
-            };
-
-            ui.painter()
-                .rect_filled(outer_rect, corner_radius, fill_color);
-        }
-
-        let painter = ui.painter_at(inner_rect);
-
-        {
-            let mut icon_rect = inner_rect;
-            icon_rect.set_height(icon_size);
-            let icon_color = style.inactive.fg_stroke.color;
-
-            match kind {
-                PathKind::Directory => directory_icon(&painter, icon_rect, icon_color),
-                PathKind::File => file_icon(&painter, icon_rect, icon_color),
-            }
-        }
-
-        {
-            let mut row_start = 0;
-            let mut chars = layout.text.chars();
-            let rows = layout.rows.iter().map(|row| {
-                let count = row.char_count_excluding_newline();
-                chars.by_ref().take(count).for_each(drop);
-                let row_end = layout.text.len() - chars.as_str().len();
-
-                let row_text = &layout.text[row_start..row_end];
-
-                row_start = row_end;
-                let new_line_count = row.char_count_including_newline() - count;
-                chars.by_ref().take(new_line_count).for_each(drop);
-
-                let size = row.rect().size();
-                (row_text, size)
-            });
-
-            let text_color = style.inactive.text_color();
-            let mut middle = inner_rect.center_bottom() - egui::vec2(0.0, layout.size.y);
-            for (text, size) in rows {
-                painter.text(
-                    middle,
-                    egui::Align2::CENTER_TOP,
-                    text,
-                    egui::TextStyle::Body,
-                    text_color,
-                );
-                middle.y += size.y;
-            }
-        }
-
-        response
-    })
-    .inner
-}
-
-fn file_icon(painter: &egui::Painter, mut area: egui::Rect, color: egui::Color32) {
-    let stroke_width = area.size().min_elem() / 20.0;
-    area = area.shrink(stroke_width / 2.0);
-
-    let center = area.center();
-    let aspect = 2.0 / 3.0;
-    let size = if area.aspect_ratio() < aspect {
-        egui::vec2(area.width(), area.width() / aspect)
-    } else {
-        egui::vec2(area.height() * aspect, area.height())
-    };
-
-    let half = 0.5 * size;
-    let fold_size = 0.4 * size.x;
-
-    painter.add(egui::Shape::Path {
-        fill: egui::Color32::TRANSPARENT,
-        stroke: egui::Stroke::new(stroke_width, color),
-        closed: false,
-        points: vec![
-            // body
-            egui::pos2(center.x + half.x - fold_size, center.y - half.y),
-            egui::pos2(center.x - half.x, center.y - half.y),
-            egui::pos2(center.x - half.x, center.y + half.y),
-            egui::pos2(center.x + half.x, center.y + half.y),
-            egui::pos2(center.x + half.x, center.y - half.y + fold_size),
-            // fold
-            egui::pos2(center.x + half.x - fold_size, center.y - half.y),
-            egui::pos2(center.x + half.x - fold_size, center.y - half.y + fold_size),
-            egui::pos2(center.x + half.x, center.y - half.y + fold_size),
-        ],
-    });
-}
-
-fn directory_icon(painter: &egui::Painter, mut area: egui::Rect, color: egui::Color32) {
-    let stroke_width = area.size().min_elem() / 20.0;
-    area = area.shrink(stroke_width / 2.0);
-
-    let center = area.center();
-    let aspect = 3.0 / 2.5;
-    let size = if area.aspect_ratio() < aspect {
-        egui::vec2(area.width(), area.width() / aspect)
-    } else {
-        egui::vec2(area.height() * aspect, area.height())
-    };
-
-    let half = 0.5 * size;
-    let fold_height = 0.1 * size.y;
-
-    painter.add(egui::Shape::Path {
-        fill: egui::Color32::TRANSPARENT,
-        stroke: egui::Stroke::new(stroke_width, color),
-        closed: false,
-        points: vec![
-            // body
-            egui::pos2(center.x - half.x, center.y - half.y),
-            egui::pos2(center.x - half.x, center.y + half.y),
-            egui::pos2(center.x + half.x, center.y + half.y),
-            egui::pos2(center.x + half.x, center.y - half.y + fold_height),
-            egui::pos2(
-                center.x - half.x + 0.4 * size.x,
-                center.y - half.y + fold_height,
-            ),
-            egui::pos2(center.x - half.x + 0.4 * size.x, center.y - half.y),
-            egui::pos2(center.x - half.x, center.y - half.y),
-        ],
     });
 }
 
@@ -1017,7 +750,7 @@ fn vec3_slider(
     let [x, y, z] = vec.as_mut();
 
     let [x_range, y_range, z_range] = match ranges.into() {
-        MultiRange::Single(range) => [range.clone(), range.clone(), range.clone()],
+        MultiRange::Single(range) => [range.clone(), range.clone(), range],
         MultiRange::Multi(ranges) => ranges,
     };
 

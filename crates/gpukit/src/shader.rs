@@ -127,7 +127,7 @@ impl<'a> ShaderBuilder<'a> {
         ShaderBuilder { context, label }
     }
 
-    fn from_source(self, source: ShaderSource) -> anyhow::Result<Shader> {
+    fn init_from_source(self, source: ShaderSource) -> anyhow::Result<Shader> {
         Shader::new(
             self.context,
             &ShaderDescriptor {
@@ -137,26 +137,26 @@ impl<'a> ShaderBuilder<'a> {
         )
     }
 
-    pub fn from_glsl(self, source: &str, stage: ShaderStage) -> anyhow::Result<Shader> {
-        self.from_source(ShaderSource::Glsl(source, stage))
+    pub fn init_from_glsl(self, source: &str, stage: ShaderStage) -> anyhow::Result<Shader> {
+        self.init_from_source(ShaderSource::Glsl(source, stage))
     }
 
-    pub fn from_wgsl(self, source: &str) -> anyhow::Result<Shader> {
-        self.from_source(ShaderSource::Wgsl(source))
+    pub fn init_from_wgsl(self, source: &str) -> anyhow::Result<Shader> {
+        self.init_from_source(ShaderSource::Wgsl(source))
     }
 
-    pub fn load(self, path: impl AsRef<std::path::Path>) -> anyhow::Result<Shader> {
+    pub fn init_from_file(self, path: impl AsRef<std::path::Path>) -> anyhow::Result<Shader> {
         let path = path.as_ref();
 
         let load_context = || format!("failed to load shader `{}`", path.display());
 
         let kind = ShaderKind::infer_from_path(path)
-            .with_context(|| format!("failed to infer shader kind"))
+            .with_context(|| "failed to infer shader kind")
             .with_context(load_context)?;
 
         let text = std::fs::read_to_string(path).with_context(load_context)?;
 
-        self.from_source(kind.source(&text))
+        self.init_from_source(kind.source(&text))
     }
 }
 
@@ -174,10 +174,8 @@ impl ShaderKind {
             Some("frag") => Ok(ShaderKind::Glsl(ShaderStage::Fragment)),
             Some("comp") => Ok(ShaderKind::Glsl(ShaderStage::Compute)),
             Some("wgsl") => Ok(ShaderKind::Wgsl),
-            Some(extension) => {
-                return Err(anyhow!("unknown shader path extension: `{}`", extension))
-            }
-            None => return Err(anyhow!("shader path missing extension")),
+            Some(extension) => Err(anyhow!("unknown shader path extension: `{}`", extension)),
+            None => Err(anyhow!("shader path missing extension")),
         }
     }
 
